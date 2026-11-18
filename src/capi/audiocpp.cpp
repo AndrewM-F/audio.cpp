@@ -27,6 +27,7 @@
 #include "engine/framework/runtime/session.h"
 #include "engine/framework/io/json.h"
 
+#include <deque>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -283,6 +284,31 @@ struct audiocpp_model {
 };
 
 struct audiocpp_session {
+    /* Text-driven TTS publishes its audio through set_stream_event_sink rather
+     * than next_stream_event (streaming_policy is FinalResult). Bridge those
+     * events into the existing pull queue so no callback has to cross the C
+     * ABI: the sink is C++-only and callers keep using next_event(). */
+    struct EventQueue {
+        std::mutex mutex;
+        std::deque<rt::StreamEvent> events;
+        void push(const rt::StreamEvent & event) {
+            std::lock_guard<std::mutex> lock(mutex);
+            events.push_back(event);
+        }
+        std::optional<rt::StreamEvent> pop() {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (events.empty()) return std::nullopt;
+            auto event = std::move(events.front());
+            events.pop_front();
+            return event;
+        }
+        void clear() {
+            std::lock_guard<std::mutex> lock(mutex);
+            events.clear();
+        }
+    };
+    std::shared_ptr<EventQueue> event_queue = std::make_shared<EventQueue>();
+
     std::shared_ptr<rt::ModelRegistry> registry;
     std::shared_ptr<rt::ILoadedVoiceModel> model;
     std::unique_ptr<rt::IVoiceTaskSession> session;
@@ -670,6 +696,11 @@ audiocpp_status audiocpp_session_create_with_impl(
         handle->mode = spec.mode;
         handle->session = model->model->create_task_session(spec, session_options);
         handle->family = handle->session->family();
+        if (spec.mode == rt::RunMode::Streaming) {
+            auto queue = handle->event_queue;
+            handle->streaming().set_stream_event_sink(
+                [queue](const rt::StreamEvent & event) { queue->push(event); });
+        }
         *out_session = handle.release();
         return AUDIOCPP_OK;
     });
@@ -1275,6 +1306,7 @@ audiocpp_status audiocpp_stream_start(audiocpp_session * session, const audiocpp
     }
     { const audiocpp_status s = require_streaming(session); if (s != AUDIOCPP_OK) return s; }
     return guard([&] {
+        session->event_queue->clear();
         const rt::TaskRequest empty;
         const auto & task_request = request != nullptr ? request->request : empty;
         session->session->prepare(rt::build_preparation_request(task_request));
@@ -1318,7 +1350,10 @@ audiocpp_status audiocpp_stream_next_event(audiocpp_session * session, audiocpp_
     *out_event = nullptr;
     { const audiocpp_status s = require_streaming(session); if (s != AUDIOCPP_OK) return s; }
     return guard([&] {
-        auto event = session->streaming().next_stream_event();
+        /* First drain events published through the internal sink (TTS), then
+         * fall back to the family's own pull queue (streaming ASR, VAD, ...). */
+        auto event = session->event_queue->pop();
+        if (!event.has_value()) event = session->streaming().next_stream_event();
         /* An empty queue is a normal outcome, not a failure. */
         if (event.has_value()) {
             *out_event = wrap_event(std::move(*event)).release();
@@ -1347,6 +1382,7 @@ audiocpp_status audiocpp_stream_reset(audiocpp_session * session) {
     }
     { const audiocpp_status s = require_streaming(session); if (s != AUDIOCPP_OK) return s; }
     return guard([&] {
+        session->event_queue->clear();
         session->streaming().reset();
         return AUDIOCPP_OK;
     });
