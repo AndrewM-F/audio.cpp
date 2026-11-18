@@ -1,5 +1,6 @@
 #pragma once
 
+#include "engine/framework/runtime/errors.h"
 #include "engine/framework/runtime/session.h"
 
 #include <algorithm>
@@ -55,13 +56,15 @@ public:
     void begin(StreamingAudioConfig config, Decode decode, StreamEventCallback sink = {},
                const std::vector<Scalar> & reference = {},
                std::function<void()> reset_decoder = {},
-               std::function<AudioBuffer()> drain_decoder = {}) {
+               std::function<AudioBuffer()> drain_decoder = {},
+               const RequestCancellation * cancellation = nullptr) {
         if (active_) throw std::logic_error("streaming audio request is already active");
         if (!decode || config.frames_per_chunk == 0 || config.frame_width == 0 ||
             reference.size() % config.frame_width != 0) {
             throw std::invalid_argument("invalid streaming audio configuration or reference frames");
         }
         reset();
+        cancellation_ = cancellation;
         config_ = config;
         if (reset_decoder) reset_decoder();
         decode_ = std::move(decode);
@@ -75,6 +78,7 @@ public:
 
     void push(const std::vector<Scalar> & frames) {
         require_active();
+        check_cancelled();
         if (frames.size() % config_.frame_width != 0) {
             throw std::invalid_argument("streaming audio input contains an incomplete frame");
         }
@@ -82,6 +86,7 @@ public:
             // Ingest incrementally even when a diffusion model supplies its
             // complete latent sequence, bounding the controller's input buffer.
             for (size_t i = 0; i < frames.size(); i += config_.frame_width) {
+                check_cancelled();
                 pending_.insert(pending_.end(), frames.begin() + i,
                                 frames.begin() + i + config_.frame_width);
                 if (available() >= target_ + config_.right_context_frames) flush(false);
@@ -94,6 +99,7 @@ public:
 
     AudioBuffer finish() {
         require_active();
+        check_cancelled();
         try {
             while (available() != 0) flush(true);
             if (drain_) {
@@ -124,6 +130,7 @@ public:
         decode_ = {};
         sink_ = {};
         drain_ = {};
+        cancellation_ = nullptr;
     }
 
     double decode_ms() const { return decode_ms_; }
@@ -137,9 +144,15 @@ private:
     void require_active() const {
         if (!active_) throw std::logic_error("streaming audio request is not active");
     }
+    void check_cancelled() const {
+        if (cancellation_ != nullptr && cancellation_->is_cancelled()) {
+            throw CancelledError("streaming audio request cancelled");
+        }
+    }
     size_t available() const { return pending_.size() / config_.frame_width - context_; }
 
     void flush(bool finishing) {
+        check_cancelled();
         const size_t count = std::min(target_, available());
         const size_t right = std::min(config_.right_context_frames, available() - count);
         const auto start = Clock::now();
@@ -158,6 +171,7 @@ private:
     }
 
     void publish(AudioBuffer audio) {
+        check_cancelled();
         if (audio.samples.empty()) return;
         append_audio_buffer(audio_, audio);
         if (sink_) {
@@ -173,6 +187,7 @@ private:
     Decode decode_;
     StreamEventCallback sink_;
     std::function<AudioBuffer()> drain_;
+    const RequestCancellation * cancellation_ = nullptr;
     std::vector<Scalar> pending_;
     AudioBuffer audio_;
     size_t context_ = 0, first_frame_ = 0, target_ = 0;

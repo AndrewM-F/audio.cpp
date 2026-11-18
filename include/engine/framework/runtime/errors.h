@@ -14,6 +14,14 @@ public:
     explicit CapacityError(const std::string & message) : std::runtime_error(message) {}
 };
 
+// A request stopped by an explicit cancellation at a cooperative boundary.
+// Distinct from a runtime fault so embedders can treat it as an expected
+// outcome of audiocpp_request_cancel() rather than an internal error.
+class CancelledError : public std::runtime_error {
+public:
+    explicit CancelledError(const std::string & message) : std::runtime_error(message) {}
+};
+
 // A request the session turns away as sent: an input or option it does not
 // take, or one that does not read, such as a malformed input artifact. The
 // caller can fix it, so servers answer it as a client error, as they do

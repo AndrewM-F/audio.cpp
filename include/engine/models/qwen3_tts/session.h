@@ -68,7 +68,8 @@ private:
         int64_t stream_frames,
         runtime::StreamingAudioChunkPolicy stream_policy,
         double & talker_ms,
-        double & decoder_ms);
+        double & decoder_ms,
+        const runtime::RequestCancellation * cancelled = nullptr);
     const Qwen3VoiceClonePrompt & resolve_voice_prompt(
         const Qwen3VoiceCloneInput & input,
         const Qwen3TTSVoiceClonePromptBuilder & prompt_builder);

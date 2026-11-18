@@ -441,6 +441,7 @@ SessionPreparationRequest build_preparation_request(const TaskRequest & request)
     prep.option_arrays = request.option_arrays;
     prep.text = request.text_input;
     prep.voice = request.voice;
+    prep.cancellation = request.cancellation;
     if (request.audio_input.has_value()) {
         prep.audio = AudioPreparationContract{
             request.audio_input->sample_rate,

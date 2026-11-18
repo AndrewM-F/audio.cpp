@@ -4,6 +4,7 @@
 #include "engine/framework/debug/trace.h"
 #include "engine/framework/io/json.h"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -163,6 +164,18 @@ VoiceArtifact make_text_artifact(
     std::string_view payload,
     std::unordered_map<std::string, std::string> meta = {});
 
+// Shared cancellation state for one request. The C ABI owns one per session
+// and attaches it to the TaskRequest it passes down; text chunking copies the
+// request, so every copy observes the same flag.
+struct RequestCancellation {
+    void cancel() noexcept { cancelled_.store(true, std::memory_order_release); }
+    void reset() noexcept { cancelled_.store(false, std::memory_order_release); }
+    bool is_cancelled() const noexcept { return cancelled_.load(std::memory_order_acquire); }
+
+private:
+    std::atomic<bool> cancelled_{false};
+};
+
 struct TaskRequest {
     std::optional<Transcript> text_input = std::nullopt;
     std::optional<AudioBuffer> audio_input = std::nullopt;
@@ -173,6 +186,8 @@ struct TaskRequest {
     /// reading either cannot silently see the other half-formed. The `*_list`
     /// option types the spec schema already declares are carried here.
     std::unordered_map<std::string, std::vector<std::string>> option_arrays;
+    /// Cooperative cancellation token, when the caller has one.
+    std::shared_ptr<RequestCancellation> cancellation;
 };
 
 struct AudioPreparationContract {
@@ -189,6 +204,7 @@ struct SessionPreparationRequest {
     /// See TaskRequest::option_arrays. Carried through preparation so a session
     /// can size its graphs for what run() will actually be handed.
     std::unordered_map<std::string, std::vector<std::string>> option_arrays;
+    std::shared_ptr<RequestCancellation> cancellation;
 };
 
 struct VoiceActivityEvent {

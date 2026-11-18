@@ -51,7 +51,7 @@ extern "C" {
 /* ------------------------------------------------------------------ */
 
 #define AUDIOCPP_ABI_VERSION_MAJOR 0
-#define AUDIOCPP_ABI_VERSION_MINOR 4
+#define AUDIOCPP_ABI_VERSION_MINOR 5
 #define AUDIOCPP_ABI_VERSION_PATCH 0
 
 /* Packed as (major << 16) | (minor << 8) | patch. A caller built against a
@@ -76,7 +76,10 @@ typedef enum audiocpp_status {
     AUDIOCPP_ERR_RUNTIME = 4,
     AUDIOCPP_ERR_OUT_OF_MEMORY = 5,
     AUDIOCPP_ERR_OUT_OF_RANGE = 6,
-    AUDIOCPP_ERR_NOT_AVAILABLE = 7
+    AUDIOCPP_ERR_NOT_AVAILABLE = 7,
+    /* Added in ABI 0.5. The request was stopped at a cooperative cancellation
+     * boundary by audiocpp_request_cancel(); no partial result is returned. */
+    AUDIOCPP_ERR_CANCELLED = 8
 } audiocpp_status;
 
 /* Detail for the most recent failure on this thread. Read it immediately after
@@ -283,6 +286,16 @@ AUDIOCPP_API audiocpp_status audiocpp_session_create_with_impl(
 AUDIOCPP_API void            audiocpp_session_free(audiocpp_session * session);
 
 AUDIOCPP_API const char * audiocpp_session_family(const audiocpp_session * session);
+
+/* Request cooperative cancellation of the work currently running on `session`.
+ * Added in ABI 0.5. Safe to call from another thread while a run or stream is
+ * in flight; this is the one exception to the handles-are-not-thread-safe rule.
+ * The stop happens at the next token/chunk boundary and the in-flight call
+ * returns AUDIOCPP_ERR_CANCELLED. Cancelling with no request in flight is
+ * harmless. Each audiocpp_session_run()/audiocpp_stream_start() clears the flag
+ * first, so a session and its request handles can be reused.
+ * Does not terminate the process or kill the generating thread. */
+AUDIOCPP_API audiocpp_status audiocpp_request_cancel(audiocpp_session * session);
 
 /* Optional. audiocpp_session_run() and audiocpp_stream_start() always prepare
  * with the request they are about to run -- preparation carries the input

@@ -12,7 +12,9 @@
 #include "engine/framework/modules/primitive_modules.h"
 #include "engine/framework/modules/structural_modules.h"
 #include "engine/framework/modules/weight_binding.h"
+#include "engine/framework/runtime/errors.h"
 #include "engine/framework/runtime/kv_cache.h"
+#include "engine/framework/runtime/session.h"
 #include "engine/framework/sampling/torch_random.h"
 #include "engine/framework/sampling/hf_sampler.h"
 
@@ -1913,7 +1915,8 @@ public:
         const Qwen3TalkerPrefill & request,
         const Qwen3TTSGenerationOptions & options,
         float repetition_penalty,
-        const std::function<void(const std::vector<int32_t> &)> & on_frame) {
+        const std::function<void(const std::vector<int32_t> &)> & on_frame,
+        const runtime::RequestCancellation * cancelled) {
         const auto total_start = Clock::now();
         const int64_t max_new_tokens = options.max_new_tokens;
         if (max_new_tokens <= 0 || max_new_tokens > generation_capacity_) {
@@ -2004,6 +2007,9 @@ public:
         CodePredictorTiming code_predictor_timing;
         CachedStepTiming cached_step_timing;
         for (int64_t step = 0; step < max_new_tokens; ++step) {
+            if (cancelled != nullptr && cancelled->is_cancelled()) {
+                throw runtime::CancelledError("Qwen3 TTS talker generation cancelled");
+            }
             auto logits = current.logits.values;
             const auto processor_start = Clock::now();
             apply_main_talker_processors(logits, config, generated_first_codes, step, repetition_penalty, sampling_scratch_);
@@ -2146,8 +2152,9 @@ Qwen3TalkerCodes Qwen3TalkerStepRuntime::generate(
     const Qwen3TalkerPrefill & prefill,
     const Qwen3TTSGenerationOptions & options,
     float repetition_penalty,
-    const std::function<void(const std::vector<int32_t> &)> & on_frame) {
-    return impl_->generate(prefill, options, repetition_penalty, on_frame);
+    const std::function<void(const std::vector<int32_t> &)> & on_frame,
+    const runtime::RequestCancellation * cancelled) {
+    return impl_->generate(prefill, options, repetition_penalty, on_frame, cancelled);
 }
 
 int64_t Qwen3TalkerStepRuntime::release_cached_step_graph() {

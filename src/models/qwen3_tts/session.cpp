@@ -2,6 +2,7 @@
 
 #include "engine/framework/core/attention_fallback.h"
 #include "engine/framework/debug/profiler.h"
+#include "engine/framework/runtime/errors.h"
 #include "engine/framework/rknn/engine.h"
 #include "engine/framework/runtime/options.h"
 #include "engine/framework/text/chunking.h"
@@ -613,10 +614,12 @@ runtime::AudioBuffer Qwen3TTSSession::generate_audio(
     int64_t stream_frames,
     runtime::StreamingAudioChunkPolicy stream_policy,
     double & talker_ms,
-    double & decoder_ms) {
+    double & decoder_ms,
+    const runtime::RequestCancellation * cancelled) {
     if (stream_frames == 0) {
         const auto talker_start = Clock::now();
-        const auto codes = talker_step_->generate(prefill, options, options.repetition_penalty);
+        const auto codes = talker_step_->generate(
+            prefill, options, options.repetition_penalty, {}, cancelled);
         talker_ms += engine::debug::elapsed_ms(talker_start);
         const auto decoder_start = Clock::now();
         auto audio = decode_speech(codes.generated_codes, reference_codes);
@@ -661,10 +664,10 @@ runtime::AudioBuffer Qwen3TTSSession::generate_audio(
             return runtime::AudioBuffer{codecs::Qwen3SpeechTokenizerDecoderRuntime::kSampleRate, 1, rknn_decoder_ != nullptr
                 ? rknn_decoder_->step(nullptr, 0, 0, speech_decoder_code_groups_, true)
                 : std::vector<float>{}};
-        });
+        }, cancelled);
     const auto talker_start = Clock::now();
     talker_step_->generate(prefill, options, options.repetition_penalty,
-        [&](const std::vector<int32_t> & frame) { stream_audio_.push(frame); });
+        [&](const std::vector<int32_t> & frame) { stream_audio_.push(frame); }, cancelled);
     talker_ms += engine::debug::elapsed_ms(talker_start) - stream_audio_.decode_ms() - stream_audio_.publish_ms();
     auto audio = stream_audio_.finish();
     decoder_ms += stream_audio_.decode_ms();
@@ -676,6 +679,13 @@ runtime::AudioBuffer Qwen3TTSSession::generate_audio(
 
 runtime::TaskResult Qwen3TTSSession::synthesize(const runtime::TaskRequest & request, bool streaming) {
     require_prepared("Qwen3 TTS run");
+    const auto * cancelled = request.cancellation.get();
+    const auto throw_if_cancelled = [&] {
+        if (cancelled != nullptr && cancelled->is_cancelled()) {
+            throw runtime::CancelledError("Qwen3 TTS synthesis cancelled");
+        }
+    };
+    throw_if_cancelled();
     const auto wall_start = Clock::now();
     const int64_t stream_frames = streaming
         ? runtime::parse_int_option(request.options, {"stream_frames_per_event"}).value_or(12) : 0;
@@ -701,6 +711,7 @@ runtime::TaskResult Qwen3TTSSession::synthesize(const runtime::TaskRequest & req
         runtime::AudioBuffer merged_audio;
         Qwen3SpeechCodes codes;
         for (const auto & chunk_request : chunk_requests) {
+            throw_if_cancelled();
             const Qwen3TTSRequest qwen_request = make_request(chunk_request);
             const auto prefill_start = Clock::now();
             const auto prefill = prompt_builder.build_prefill(qwen_request);
@@ -708,13 +719,13 @@ runtime::TaskResult Qwen3TTSSession::synthesize(const runtime::TaskRequest & req
             if (stitch_decode_ && stream_frames == 0) {
                 const auto talker_start = Clock::now();
                 auto generated = talker_step_->generate(
-                    prefill, qwen_request.generation, qwen_request.generation.repetition_penalty);
+                    prefill, qwen_request.generation, qwen_request.generation.repetition_penalty, {}, cancelled);
                 talker_ms += engine::debug::elapsed_ms(talker_start);
                 append_speech_codes(codes, generated.generated_codes);
             } else {
                 runtime::append_audio_buffer(
                     merged_audio,
-                    generate_audio(prefill, qwen_request.generation, nullptr, stream_frames, stream_policy, talker_ms, decoder_ms));
+                    generate_audio(prefill, qwen_request.generation, nullptr, stream_frames, stream_policy, talker_ms, decoder_ms, cancelled));
             }
         }
         if (stitch_decode_ && stream_frames == 0) {
@@ -742,6 +753,7 @@ runtime::TaskResult Qwen3TTSSession::synthesize(const runtime::TaskRequest & req
         runtime::AudioBuffer merged_audio;
         Qwen3SpeechCodes codes;
         for (const auto & chunk_request : chunk_requests) {
+            throw_if_cancelled();
             const Qwen3TTSRequest qwen_request = make_request(chunk_request);
             const auto prefill_start = Clock::now();
             const auto prefill = prompt_builder.build_prefill(qwen_request);
@@ -749,13 +761,13 @@ runtime::TaskResult Qwen3TTSSession::synthesize(const runtime::TaskRequest & req
             if (stitch_decode_ && stream_frames == 0) {
                 const auto talker_start = Clock::now();
                 auto generated = talker_step_->generate(
-                    prefill, qwen_request.generation, qwen_request.generation.repetition_penalty);
+                    prefill, qwen_request.generation, qwen_request.generation.repetition_penalty, {}, cancelled);
                 talker_ms += engine::debug::elapsed_ms(talker_start);
                 append_speech_codes(codes, generated.generated_codes);
             } else {
                 runtime::append_audio_buffer(
                     merged_audio,
-                    generate_audio(prefill, qwen_request.generation, nullptr, stream_frames, stream_policy, talker_ms, decoder_ms));
+                    generate_audio(prefill, qwen_request.generation, nullptr, stream_frames, stream_policy, talker_ms, decoder_ms, cancelled));
             }
         }
         if (stitch_decode_ && stream_frames == 0) {
@@ -792,6 +804,7 @@ runtime::TaskResult Qwen3TTSSession::synthesize(const runtime::TaskRequest & req
     Qwen3SpeechCodes codes;
     std::optional<Qwen3SpeechCodes> reference_codes;
     for (const auto & chunk_request : chunk_requests) {
+        throw_if_cancelled();
         const Qwen3TTSRequest qwen_request = make_request(chunk_request);
         const auto prompt_start = Clock::now();
         const auto & voice_prompt = resolve_voice_prompt(*qwen_request.voice_clone, prompt_builder);
@@ -799,10 +812,11 @@ runtime::TaskResult Qwen3TTSSession::synthesize(const runtime::TaskRequest & req
         const auto prefill_start = Clock::now();
         const auto prefill = prompt_builder.build_prefill(qwen_request, voice_prompt);
         prefill_ms += engine::debug::elapsed_ms(prefill_start, Clock::now());
+        throw_if_cancelled();
         if (stitch_decode_ && stream_frames == 0) {
             const auto talker_start = Clock::now();
             auto generated = talker_step_->generate(
-                prefill, qwen_request.generation, qwen_request.generation.repetition_penalty);
+                prefill, qwen_request.generation, qwen_request.generation.repetition_penalty, {}, cancelled);
             talker_ms += engine::debug::elapsed_ms(talker_start);
             append_speech_codes(codes, generated.generated_codes);
             if (!reference_codes && voice_prompt.reference_codes) {
@@ -812,7 +826,7 @@ runtime::TaskResult Qwen3TTSSession::synthesize(const runtime::TaskRequest & req
             runtime::append_audio_buffer(merged_audio, generate_audio(
                 prefill, qwen_request.generation,
                 voice_prompt.reference_codes ? &*voice_prompt.reference_codes : nullptr,
-                stream_frames, stream_policy, talker_ms, decoder_ms));
+                stream_frames, stream_policy, talker_ms, decoder_ms, cancelled));
         }
     }
     if (stitch_decode_ && stream_frames == 0) {

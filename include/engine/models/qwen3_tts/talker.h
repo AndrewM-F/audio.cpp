@@ -13,6 +13,10 @@
 #include <string>
 #include <vector>
 
+namespace engine::runtime {
+struct RequestCancellation;
+}
+
 namespace engine::models::qwen3_tts {
 
 enum class Qwen3TalkerPromptMode {
@@ -56,7 +60,8 @@ public:
         const Qwen3TalkerPrefill & prefill,
         const Qwen3TTSGenerationOptions & options,
         float repetition_penalty = 1.05F,
-        const std::function<void(const std::vector<int32_t> &)> & on_frame = {});
+        const std::function<void(const std::vector<int32_t> &)> & on_frame = {},
+        const engine::runtime::RequestCancellation * cancelled = nullptr);
     int64_t release_cached_step_graph();
 
 private:

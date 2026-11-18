@@ -175,6 +175,9 @@ audiocpp_status guard(Fn && fn, audiocpp_status runtime_status = AUDIOCPP_ERR_RU
         /* Caller input such as a malformed option value: not a load or runtime failure. */
         g_last_error = e.what();
         return AUDIOCPP_ERR_INVALID_ARGUMENT;
+    } catch (const rt::CancelledError & e) {
+        g_last_error = e.what();
+        return AUDIOCPP_ERR_CANCELLED;
     } catch (const std::exception & e) {
         g_last_error = e.what();
         return runtime_status;
@@ -283,6 +286,11 @@ struct audiocpp_model {
 };
 
 struct audiocpp_session {
+    /* The one mutable flag audiocpp_request_cancel() sets from another thread.
+     * Attached to each request this session starts or runs, and cleared before
+     * the next one so a handle can be reused. */
+    std::shared_ptr<rt::RequestCancellation> cancellation =
+        std::make_shared<rt::RequestCancellation>();
     std::shared_ptr<rt::ModelRegistry> registry;
     std::shared_ptr<rt::ILoadedVoiceModel> model;
     std::unique_ptr<rt::IVoiceTaskSession> session;
@@ -390,6 +398,7 @@ const char * audiocpp_status_string(audiocpp_status status) {
         case AUDIOCPP_ERR_OUT_OF_MEMORY: return "out of memory";
         case AUDIOCPP_ERR_OUT_OF_RANGE: return "index out of range";
         case AUDIOCPP_ERR_NOT_AVAILABLE: return "not available";
+        case AUDIOCPP_ERR_CANCELLED: return "cancelled";
     }
     return "unknown status";
 }
@@ -684,6 +693,16 @@ const char * audiocpp_session_family(const audiocpp_session * session) {
     return session->family.c_str();
 }
 
+audiocpp_status audiocpp_request_cancel(audiocpp_session * session) {
+    if (session == nullptr) {
+        return fail(AUDIOCPP_ERR_INVALID_ARGUMENT, "session must be non-null");
+    }
+    /* No guard(): setting one atomic cannot throw, and a failed cancellation
+     * must not overwrite the in-flight call's thread-local last error. */
+    session->cancellation->cancel();
+    return AUDIOCPP_OK;
+}
+
 audiocpp_status audiocpp_session_prepare(audiocpp_session * session, const audiocpp_request * request) {
     if (session == nullptr) {
         return fail(AUDIOCPP_ERR_INVALID_ARGUMENT, "session must be non-null");
@@ -708,15 +727,18 @@ audiocpp_status audiocpp_session_run(audiocpp_session * session,
     }
     return guard([&] {
         const rt::TaskRequest empty;
-        const auto & task_request = request != nullptr ? request->request : empty;
+        const auto task_request = request != nullptr ? request->request : empty;
+        session->cancellation->reset();
+        auto bound_request = task_request;
+        bound_request.cancellation = session->cancellation;
         /* Always prepared with the request that is about to run, exactly as
          * audiocpp_cli does. build_preparation_request carries the input
          * length, so preparing once and then running a different request would
          * leave the session sized for the wrong input. */
-        session->session->prepare(rt::build_preparation_request(task_request));
+        session->session->prepare(rt::build_preparation_request(bound_request));
 
         auto handle = std::make_unique<audiocpp_result>();
-        handle->result = session->offline().run(task_request);
+        handle->result = session->offline().run(bound_request);
         *out_result = handle.release();
         return AUDIOCPP_OK;
     });
@@ -1276,9 +1298,12 @@ audiocpp_status audiocpp_stream_start(audiocpp_session * session, const audiocpp
     { const audiocpp_status s = require_streaming(session); if (s != AUDIOCPP_OK) return s; }
     return guard([&] {
         const rt::TaskRequest empty;
-        const auto & task_request = request != nullptr ? request->request : empty;
-        session->session->prepare(rt::build_preparation_request(task_request));
-        session->streaming().start_stream(task_request);
+        const auto task_request = request != nullptr ? request->request : empty;
+        session->cancellation->reset();
+        auto bound_request = task_request;
+        bound_request.cancellation = session->cancellation;
+        session->session->prepare(rt::build_preparation_request(bound_request));
+        session->streaming().start_stream(bound_request);
         return AUDIOCPP_OK;
     });
 }
@@ -1347,6 +1372,7 @@ audiocpp_status audiocpp_stream_reset(audiocpp_session * session) {
     }
     { const audiocpp_status s = require_streaming(session); if (s != AUDIOCPP_OK) return s; }
     return guard([&] {
+        session->cancellation->reset();
         session->streaming().reset();
         return AUDIOCPP_OK;
     });

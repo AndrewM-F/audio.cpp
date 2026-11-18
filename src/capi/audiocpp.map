@@ -8,6 +8,7 @@
  */
 AUDIOCPP_0 {
     global:
+        audiocpp_request_cancel;
         audiocpp_*;
     local:
         *;
